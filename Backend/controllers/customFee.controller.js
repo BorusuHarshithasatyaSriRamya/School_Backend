@@ -1,5 +1,5 @@
 import CustomFee from "../models/customFee.model.js";
-import FeeStructure from "../models/feeStructure.model.js"; // Import your standard structure model
+import FeeStructure from "../models/FeeStructure.model.js"; // Import your standard structure model
 
 export const createOrUpdateCustomFee = async (req, res) => {
   try {
