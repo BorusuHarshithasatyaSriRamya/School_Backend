@@ -2,8 +2,9 @@ services:
   - type: web
     name: Backend
     env: node
-    buildCommand: cd Backend && npm install
-    startCommand: cd Backend && npm start
+    rootDir: Backend
+    buildCommand: npm install
+    startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
