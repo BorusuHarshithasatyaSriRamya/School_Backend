@@ -17,12 +17,30 @@ export const markTeacherAttendance = async (req, res) => {
 
     for (let record of attendanceData) {
       const { teacherId, status, reason, date } = record;
-      // Parse date as local date to avoid timezone issues
-      const rawDate = date ? new Date(date + 'T00:00:00') : new Date();
-      const dayStart = new Date(rawDate);
-      const dayEnd = new Date(rawDate);
-      dayEnd.setHours(23, 59, 59, 999);
-      const key = `${teacherId}-${dayStart.toISOString()}`;
+      // Parse date and store at UTC noon to avoid timezone issues
+      // When date is "2025-11-08", store it as 2025-11-08 12:00:00 UTC
+      // This ensures the date is always stored as the correct calendar day regardless of timezone
+      let dateToStore, dayStart, dayEnd;
+      if (date) {
+        // Parse YYYY-MM-DD format and create UTC date at noon (12:00:00 UTC)
+        const [year, month, day] = date.split('-').map(Number);
+        // Create date at UTC noon to ensure correct calendar day storage
+        dateToStore = new Date(Date.UTC(year, month - 1, day, 12, 0, 0, 0));
+        // For querying, use UTC start and end of day
+        dayStart = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+        dayEnd = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999));
+        console.log("📅 Parsed date string:", date, "Storing as UTC:", dateToStore.toISOString(), "Query range:", dayStart.toISOString(), "to", dayEnd.toISOString());
+      } else {
+        // Use today's date at UTC noon
+        const today = new Date();
+        const year = today.getUTCFullYear();
+        const month = today.getUTCMonth();
+        const day = today.getUTCDate();
+        dateToStore = new Date(Date.UTC(year, month, day, 12, 0, 0, 0));
+        dayStart = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
+        dayEnd = new Date(Date.UTC(year, month, day, 23, 59, 59, 999));
+      }
+      const key = `${teacherId}-${dateToStore.toISOString()}`;
 
       if (groupedByDate[key]) {
         skippedTeachers.push(teacherId); // already processed in this request
@@ -60,7 +78,7 @@ export const markTeacherAttendance = async (req, res) => {
         subject: teacher.subject || 'N/A',
         status,
         reason: status === 'absent' ? reason : '',
-        date: dayStart,
+        date: dateToStore, // Store at UTC noon to ensure correct calendar day
         markedBy: req.user._id,
         markedByRole: req.user.role
       });
@@ -70,14 +88,24 @@ export const markTeacherAttendance = async (req, res) => {
     }
 
     // Calculate summary statistics for the submitted date
-    const submittedDate = attendanceData[0]?.date ? new Date(attendanceData[0].date + 'T00:00:00') : new Date();
-    const dayStart = new Date(submittedDate);
-    const dayEnd = new Date(submittedDate);
-    dayEnd.setHours(23, 59, 59, 999);
+    let summaryDayStart, summaryDayEnd;
+    if (attendanceData[0]?.date) {
+      // Parse YYYY-MM-DD format and use UTC for querying
+      const [year, month, day] = attendanceData[0].date.split('-').map(Number);
+      summaryDayStart = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+      summaryDayEnd = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999));
+    } else {
+      const today = new Date();
+      const year = today.getUTCFullYear();
+      const month = today.getUTCMonth();
+      const day = today.getUTCDate();
+      summaryDayStart = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
+      summaryDayEnd = new Date(Date.UTC(year, month, day, 23, 59, 59, 999));
+    }
 
     // Get all attendance records for this date
     const allAttendanceForDate = await TeacherAttendance.find({
-      date: { $gte: dayStart, $lte: dayEnd }
+      date: { $gte: summaryDayStart, $lte: summaryDayEnd }
     });
 
     // Calculate summary
@@ -87,7 +115,7 @@ export const markTeacherAttendance = async (req, res) => {
       absent: allAttendanceForDate.filter(record => record.status === 'absent').length,
       late: allAttendanceForDate.filter(record => record.status === 'late').length,
       halfDay: allAttendanceForDate.filter(record => record.status === 'half-day').length,
-      date: submittedDate.toISOString().split('T')[0]
+      date: attendanceData[0]?.date || summaryDayStart.toISOString().split('T')[0]
     };
 
     res.status(200).json({
@@ -111,17 +139,20 @@ export const getAllTeachersAttendance = async (req, res) => {
     const query = {};
     
     if (startDate && endDate) {
-      // Create proper date range to match the markTeacherAttendance function
-      // Parse dates as local dates to avoid timezone issues
-      const start = new Date(startDate + 'T00:00:00');
-      const end = new Date(endDate + 'T23:59:59');
+      // Create proper date range using UTC to match stored dates
+      // Dates are stored at UTC noon, so query using UTC start/end of day
+      const [startYear, startMonth, startDay] = startDate.split('-').map(Number);
+      const [endYear, endMonth, endDay] = endDate.split('-').map(Number);
+      const start = new Date(Date.UTC(startYear, startMonth - 1, startDay, 0, 0, 0, 0));
+      const end = new Date(Date.UTC(endYear, endMonth - 1, endDay, 23, 59, 59, 999));
       
       query.date = {
         $gte: start,
         $lte: end
       };
-      console.log("Date query:", query.date);
-      console.log("Input dates:", { startDate, endDate });
+      console.log("📅 Date query - Parsed startDate:", startDate, "UTC:", start.toISOString());
+      console.log("📅 Date query - Parsed endDate:", endDate, "UTC:", end.toISOString());
+      console.log("Date query range:", query.date);
     }
 
     if (teacherId) {
@@ -260,10 +291,20 @@ export const deleteTeacherAttendance = async (req, res) => {
 export const getTeachersWithoutAttendance = async (req, res) => {
   try {
     const { date } = req.query;
-    const targetDate = date ? new Date(date) : new Date();
-    targetDate.setHours(0, 0, 0, 0);
-    const nextDay = new Date(targetDate);
-    nextDay.setDate(nextDay.getDate() + 1);
+    let targetDate, nextDay;
+    if (date) {
+      // Parse YYYY-MM-DD format and use UTC
+      const [year, month, day] = date.split('-').map(Number);
+      targetDate = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+      nextDay = new Date(Date.UTC(year, month - 1, day + 1, 0, 0, 0, 0));
+    } else {
+      const today = new Date();
+      const year = today.getUTCFullYear();
+      const month = today.getUTCMonth();
+      const day = today.getUTCDate();
+      targetDate = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
+      nextDay = new Date(Date.UTC(year, month, day + 1, 0, 0, 0, 0));
+    }
 
     // Get all teachers
     const allTeachers = await Teacher.find()
@@ -337,10 +378,12 @@ export const getDailyTeacherAttendanceSummary = async (req, res) => {
       return res.status(400).json({ message: "Date is required" });
     }
 
-    const targetDate = new Date(date + 'T00:00:00');
-    const dayStart = new Date(targetDate);
-    const dayEnd = new Date(targetDate);
-    dayEnd.setHours(23, 59, 59, 999);
+    // Parse YYYY-MM-DD format and use UTC for querying
+    // Dates are stored at UTC noon, so query using UTC start/end of day
+    const [year, month, day] = date.split('-').map(Number);
+    const dayStart = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+    const dayEnd = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999));
+    console.log("📅 Daily summary - Parsed date string:", date, "Query UTC range:", dayStart.toISOString(), "to", dayEnd.toISOString());
 
     // Get all teachers
     const allTeachers = await Teacher.find();
@@ -369,7 +412,7 @@ export const getDailyTeacherAttendanceSummary = async (req, res) => {
       late,
       halfDay,
       attendancePercentage,
-      date: dayStart.toISOString().slice(0, 10)
+      date: date // Use the original date string from query parameter
     });
 
   } catch (error) {
@@ -383,10 +426,26 @@ export const getAttendanceSummary = async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
     const today = new Date();
-    const todayStart = new Date(today.setHours(0, 0, 0, 0));
+    const year = today.getUTCFullYear();
+    const month = today.getUTCMonth();
+    const day = today.getUTCDate();
+    const todayStart = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
     
-    const start = startDate ? new Date(startDate) : new Date(todayStart.getTime() - 30 * 24 * 60 * 60 * 1000); // Last 30 days
-    const end = endDate ? new Date(endDate) : today;
+    let start, end;
+    if (startDate) {
+      const [startYear, startMonth, startDay] = startDate.split('-').map(Number);
+      start = new Date(Date.UTC(startYear, startMonth - 1, startDay, 0, 0, 0, 0));
+    } else {
+      // Last 30 days from today
+      start = new Date(Date.UTC(year, month, day - 30, 0, 0, 0, 0));
+    }
+    
+    if (endDate) {
+      const [endYear, endMonth, endDay] = endDate.split('-').map(Number);
+      end = new Date(Date.UTC(endYear, endMonth - 1, endDay, 23, 59, 59, 999));
+    } else {
+      end = new Date(Date.UTC(year, month, day, 23, 59, 59, 999));
+    }
 
     const summary = await TeacherAttendance.aggregate([
       {
@@ -461,9 +520,12 @@ export const getTeacherAttendanceHistory = async (req, res) => {
     const query = { teacher: teacher._id };
     
     if (startDate && endDate) {
+      // Parse YYYY-MM-DD format and use UTC for querying
+      const [startYear, startMonth, startDay] = startDate.split('-').map(Number);
+      const [endYear, endMonth, endDay] = endDate.split('-').map(Number);
       query.date = {
-        $gte: new Date(startDate),
-        $lte: new Date(endDate)
+        $gte: new Date(Date.UTC(startYear, startMonth - 1, startDay, 0, 0, 0, 0)),
+        $lte: new Date(Date.UTC(endYear, endMonth - 1, endDay, 23, 59, 59, 999))
       };
     }
 
@@ -512,14 +574,33 @@ export const getTeacherAttendanceSummary = async (req, res) => {
 
     // Handle month/year parameters
     if (month && year) {
-      start = new Date(`${year}-${month}-01`);
-      end = new Date(start);
-      end.setMonth(end.getMonth() + 1);
+      const monthNum = parseInt(month);
+      const yearNum = parseInt(year);
+      start = new Date(Date.UTC(yearNum, monthNum - 1, 1, 0, 0, 0, 0));
+      end = new Date(Date.UTC(yearNum, monthNum, 1, 0, 0, 0, 0)); // First day of next month
     } else {
       // Handle startDate/endDate parameters
-      start = startDate ? new Date(startDate) : new Date();
-      start.setMonth(start.getMonth() - 1); // Default to last month
-      end = endDate ? new Date(endDate) : new Date();
+      if (startDate) {
+        const [startYear, startMonth, startDay] = startDate.split('-').map(Number);
+        start = new Date(Date.UTC(startYear, startMonth - 1, startDay, 0, 0, 0, 0));
+      } else {
+        // Default to last month
+        const today = new Date();
+        const year = today.getUTCFullYear();
+        const month = today.getUTCMonth();
+        start = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
+      }
+      
+      if (endDate) {
+        const [endYear, endMonth, endDay] = endDate.split('-').map(Number);
+        end = new Date(Date.UTC(endYear, endMonth - 1, endDay, 23, 59, 59, 999));
+      } else {
+        const today = new Date();
+        const year = today.getUTCFullYear();
+        const month = today.getUTCMonth();
+        const day = today.getUTCDate();
+        end = new Date(Date.UTC(year, month, day, 23, 59, 59, 999));
+      }
     }
 
     // Get attendance records

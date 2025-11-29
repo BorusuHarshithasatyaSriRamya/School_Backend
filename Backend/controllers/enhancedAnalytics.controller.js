@@ -9,6 +9,25 @@ import TeacherAttendance from "../models/TeacherAttendance.js";
 import { getAcademicYear } from "../config/appConfig.js";
 import { cache, cacheKeys, invalidateCache } from "../lib/redis.js";
 
+// 🔧 Utility – always build day range in UTC to avoid timezone drift
+const getUtcDayRange = (date) => {
+  const start = new Date(Date.UTC(
+    date.getUTCFullYear(),
+    date.getUTCMonth(),
+    date.getUTCDate(),
+    0, 0, 0, 0
+  ));
+
+  const end = new Date(Date.UTC(
+    date.getUTCFullYear(),
+    date.getUTCMonth(),
+    date.getUTCDate(),
+    23, 59, 59, 999
+  ));
+
+  return { start, end };
+};
+
 // 🗑️ CACHE INVALIDATION FUNCTIONS
 export const invalidateAnalyticsCache = async (type = 'all', academicYear = '') => {
   try {
@@ -106,19 +125,9 @@ export const getComprehensiveDashboardAnalytics = async (req, res) => {
     // 👥 ATTENDANCE METRICS (Real data from attendance models)
     // Use targetDate instead of currentDate for attendance calculations
     const currentDate = targetDate;
-    // Use local timezone for date calculations
-    const startOfDay = new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate(), 0, 0, 0, 0);
-    const endOfDay = new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate(), 23, 59, 59, 999);
+    const { start: startOfDay, end: endOfDay } = getUtcDayRange(currentDate);
     
-    console.log("=== ATTENDANCE QUERY DEBUG ===");
-    console.log("Current Date:", currentDate);
-    console.log("Current Date Local:", currentDate.toLocaleString());
-    console.log("Start of Day (Local):", startOfDay);
-    console.log("End of Day (Local):", endOfDay);
-    console.log("Start of Day (UTC):", startOfDay.toISOString());
-    console.log("End of Day (UTC):", endOfDay.toISOString());
-    console.log("Start of Day Local String:", startOfDay.toLocaleString());
-    console.log("End of Day Local String:", endOfDay.toLocaleString());
+   
 
     // Get total enrolled students count (all classes and sections)
     const totalEnrolledStudents = await Student.countDocuments();
@@ -172,13 +181,7 @@ export const getComprehensiveDashboardAnalytics = async (req, res) => {
     const studentsNotMarked = totalEnrolledStudents - attendanceData.attendanceRecordsCount;
     const totalMarkedToday = attendanceData.attendanceRecordsCount;
     
-    console.log("=== TODAY'S ATTENDANCE SUMMARY ===");
-    console.log("Total Enrolled Students:", totalEnrolledStudents);
-    console.log("Students Present Today:", attendanceToday);
-    console.log("Students Absent Today:", studentsAbsent);
-    console.log("Students Not Marked:", studentsNotMarked);
-    console.log("Total Marked Today:", totalMarkedToday);
-
+  
     // Get total enrolled teachers count
     const totalEnrolledTeachers = await Teacher.countDocuments();
     
@@ -215,16 +218,7 @@ export const getComprehensiveDashboardAnalytics = async (req, res) => {
     const teachersAbsent = teacherAttendanceData.teachersAbsent;
     const teachersNotMarked = totalEnrolledTeachers - teacherAttendanceData.attendanceRecordsCount;
 
-    console.log("=== ATTENDANCE CALCULATION DEBUG ===");
-    console.log("Total Enrolled Students:", totalEnrolledStudents);
-    console.log("Total Enrolled Teachers:", totalEnrolledTeachers);
-    console.log("Students Present Today:", attendanceToday);
-    console.log("Students Absent Today:", studentsAbsent);
-    console.log("Students Not Marked:", studentsNotMarked);
-    console.log("Teachers Present Today:", teacherAttendanceToday);
-    console.log("Teachers Absent Today:", teachersAbsent);
-    console.log("Teachers Not Marked:", teachersNotMarked);
-    console.log("=== END ATTENDANCE DEBUG ===");
+
 
     // 📊 COLLECTION EFFICIENCY
     const totalExpectedFee = await Student.aggregate([
@@ -504,9 +498,7 @@ export const getRealTimeDashboardUpdates = async (req, res) => {
     // Use provided date or default to today
     const targetDate = date ? new Date(date) : new Date();
     const today = targetDate;
-    // Use local timezone for date calculations
-    const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 0, 0, 0, 0);
-    const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999);
+    const { start: startOfDay, end: endOfDay } = getUtcDayRange(today);
 
     // Generate cache key for real-time data (shorter TTL for real-time data)
     const cacheKey = cacheKeys.analytics.realTime(date || 'today', academicYear);

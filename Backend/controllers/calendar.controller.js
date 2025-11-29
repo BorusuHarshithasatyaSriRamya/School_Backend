@@ -8,15 +8,34 @@ const SCOPES = ["https://www.googleapis.com/auth/calendar"];
 const CALENDAR_ID = process.env.CALENDAR_ID;
 const TIMEZONE = process.env.TIMEZONE || "Asia/Kolkata";
 
-const auth = new google.auth.GoogleAuth({
-  keyFile: KEYFILEPATH,
-  scopes: SCOPES,
-});
+// Initialize calendar only if credentials are available
+let auth = null;
+let calendar = null;
 
-const calendar = google.calendar({ version: "v3", auth });
+if (KEYFILEPATH && CALENDAR_ID) {
+  try {
+    auth = new google.auth.GoogleAuth({
+      keyFile: KEYFILEPATH,
+      scopes: SCOPES,
+    });
+    calendar = google.calendar({ version: "v3", auth });
+  } catch (err) {
+    console.error("Failed to initialize Google Calendar auth:", err);
+  }
+} else {
+  console.warn("Google Calendar not configured: Missing SERVICE_ACCOUNT_PATH or CALENDAR_ID");
+}
 
 export const createEvent = async (req, res) => {
   try {
+    // Validate calendar configuration
+    if (!KEYFILEPATH || !CALENDAR_ID || !calendar) {
+      return res.status(500).json({ 
+        success: false, 
+        error: "Calendar service is not configured. Please check SERVICE_ACCOUNT_PATH and CALENDAR_ID environment variables." 
+      });
+    }
+
     const { summary, description, location, startTime, endTime, category } = req.body;
     if (!summary || !startTime || !endTime) {
       return res.status(400).json({ success: false, error: "Missing required fields" });
@@ -57,6 +76,26 @@ export const createEvent = async (req, res) => {
 
 export const listEvents = async (req, res) => {
   try {
+    // Validate required environment variables and calendar initialization
+    if (!KEYFILEPATH || !CALENDAR_ID) {
+      console.error("Calendar configuration missing:", { 
+        hasKeyFile: !!KEYFILEPATH, 
+        hasCalendarId: !!CALENDAR_ID 
+      });
+      return res.status(500).json({ 
+        success: false, 
+        error: "Calendar service is not configured. Please check SERVICE_ACCOUNT_PATH and CALENDAR_ID environment variables." 
+      });
+    }
+
+    if (!calendar) {
+      console.error("Calendar not initialized");
+      return res.status(500).json({ 
+        success: false, 
+        error: "Calendar service failed to initialize. Please check service account credentials." 
+      });
+    }
+
     // Optionally: allow fetching all events, not just future
     const timeMin = req.query.all === "true" ? undefined : new Date().toISOString();
     const response = await calendar.events.list({
@@ -67,10 +106,25 @@ export const listEvents = async (req, res) => {
       orderBy: "startTime",
     });
 
-    res.status(200).json({ success: true, events: response.data.items });
+    res.status(200).json({ success: true, events: response.data.items || [] });
   } catch (err) {
     console.error("Google Calendar listEvents error:", err);
-    res.status(500).json({ success: false, error: "Failed to fetch events" });
+    
+    // Provide more specific error messages
+    let errorMessage = "Failed to fetch events";
+    if (err.code === 'ENOENT') {
+      errorMessage = "Calendar service account file not found. Please check SERVICE_ACCOUNT_PATH.";
+    } else if (err.code === 401 || err.code === 403) {
+      errorMessage = "Calendar authentication failed. Please check service account credentials.";
+    } else if (err.message) {
+      errorMessage = `Failed to fetch events: ${err.message}`;
+    }
+    
+    res.status(500).json({ 
+      success: false, 
+      error: errorMessage,
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
   }
 };
 
@@ -78,6 +132,14 @@ export const listEvents = async (req, res) => {
 // ✅ Update Event
 export const updateEvent = async (req, res) => {
   try {
+    // Validate calendar configuration
+    if (!KEYFILEPATH || !CALENDAR_ID || !calendar) {
+      return res.status(500).json({ 
+        success: false, 
+        error: "Calendar service is not configured. Please check SERVICE_ACCOUNT_PATH and CALENDAR_ID environment variables." 
+      });
+    }
+
     const { eventId } = req.params;
     const { summary, description, location, startTime, endTime, category } = req.body;
 
@@ -121,6 +183,14 @@ export const updateEvent = async (req, res) => {
 // ✅ Delete Event
 export const deleteEvent = async (req, res) => {
   try {
+    // Validate calendar configuration
+    if (!KEYFILEPATH || !CALENDAR_ID || !calendar) {
+      return res.status(500).json({ 
+        success: false, 
+        error: "Calendar service is not configured. Please check SERVICE_ACCOUNT_PATH and CALENDAR_ID environment variables." 
+      });
+    }
+
     const { eventId } = req.params;
 
     if (!eventId) {
