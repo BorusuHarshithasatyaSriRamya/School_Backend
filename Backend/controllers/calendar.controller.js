@@ -63,23 +63,46 @@ export const createEvent = async (req, res) => {
     if (!isCalendarConfigured || !calendar) {
       return res.status(503).json({ 
         success: false, 
-        error: "Calendar service is not configured. Please check SERVICE_ACCOUNT_PATH and CALENDAR_ID environment variables." 
+        error: "Calendar service is not configured. Please check SERVICE_ACCOUNT_PATH and CALENDAR_ID environment variables.",
+        message: "Calendar service is not configured. Please contact the administrator to set up Google Calendar integration."
       });
     }
 
     const { summary, description, location, startTime, endTime, category } = req.body;
     if (!summary || !startTime || !endTime) {
-      return res.status(400).json({ success: false, error: "Missing required fields" });
+      return res.status(400).json({ 
+        success: false, 
+        error: "Missing required fields",
+        message: "Please provide title, start time, and end time for the event."
+      });
     }
 
     // ✅ Ensure RFC3339 format
-    const formattedStart = new Date(startTime).toISOString();
-    const formattedEnd = new Date(endTime).toISOString();
+    let formattedStart, formattedEnd;
+    try {
+      formattedStart = new Date(startTime).toISOString();
+      formattedEnd = new Date(endTime).toISOString();
+      
+      // Validate dates
+      if (isNaN(new Date(startTime).getTime()) || isNaN(new Date(endTime).getTime())) {
+        return res.status(400).json({ 
+          success: false, 
+          error: "Invalid date format",
+          message: "Please provide valid start and end dates."
+        });
+      }
+    } catch (dateError) {
+      return res.status(400).json({ 
+        success: false, 
+        error: "Invalid date format",
+        message: "Please provide valid start and end dates."
+      });
+    }
 
     const event = {
       summary,
-      description,
-      location,
+      description: description || "",
+      location: location || "",
       start: { dateTime: formattedStart, timeZone: TIMEZONE },
       end: { dateTime: formattedEnd, timeZone: TIMEZONE },
     };
@@ -98,10 +121,38 @@ export const createEvent = async (req, res) => {
       resource: event,
     });
 
-    res.status(200).json({ success: true, event: response.data });
+    // Ensure consistent response structure
+    res.status(200).json({ 
+      success: true, 
+      event: response.data,
+      message: "Event created successfully"
+    });
   } catch (err) {
     console.error("Google Calendar createEvent error:", err);
-    res.status(500).json({ success: false, error: "Failed to create event" });
+    
+    // Check if it's a Google API error
+    if (err.code === 401 || err.code === 403) {
+      return res.status(503).json({ 
+        success: false, 
+        error: "Calendar authentication failed",
+        message: "Calendar service is not configured. Please contact the administrator to set up Google Calendar integration."
+      });
+    }
+    
+    // Check if it's a calendar not found error
+    if (err.message?.includes('not found') || err.code === 404) {
+      return res.status(503).json({ 
+        success: false, 
+        error: "Calendar not found",
+        message: "Calendar service is not configured. Please contact the administrator to set up Google Calendar integration."
+      });
+    }
+    
+    res.status(500).json({ 
+      success: false, 
+      error: err.message || "Failed to create event",
+      message: "An error occurred while creating the event. Please try again."
+    });
   }
 };
 
@@ -172,7 +223,8 @@ export const updateEvent = async (req, res) => {
     if (!isCalendarConfigured || !calendar) {
       return res.status(503).json({ 
         success: false, 
-        error: "Calendar service is not configured. Please check SERVICE_ACCOUNT_PATH and CALENDAR_ID environment variables." 
+        error: "Calendar service is not configured. Please check SERVICE_ACCOUNT_PATH and CALENDAR_ID environment variables.",
+        message: "Calendar service is not configured. Please contact the administrator to set up Google Calendar integration."
       });
     }
 
@@ -180,16 +232,37 @@ export const updateEvent = async (req, res) => {
     const { summary, description, location, startTime, endTime, category } = req.body;
 
     if (!eventId) {
-      return res.status(400).json({ success: false, error: "Event ID required" });
+      return res.status(400).json({ 
+        success: false, 
+        error: "Event ID required",
+        message: "Event ID is required to update the event."
+      });
     }
 
-    const formattedStart = new Date(startTime).toISOString();
-    const formattedEnd = new Date(endTime).toISOString();
+    let formattedStart, formattedEnd;
+    try {
+      formattedStart = new Date(startTime).toISOString();
+      formattedEnd = new Date(endTime).toISOString();
+      
+      if (isNaN(new Date(startTime).getTime()) || isNaN(new Date(endTime).getTime())) {
+        return res.status(400).json({ 
+          success: false, 
+          error: "Invalid date format",
+          message: "Please provide valid start and end dates."
+        });
+      }
+    } catch (dateError) {
+      return res.status(400).json({ 
+        success: false, 
+        error: "Invalid date format",
+        message: "Please provide valid start and end dates."
+      });
+    }
 
     const updatedEvent = {
       summary,
-      description,
-      location,
+      description: description || "",
+      location: location || "",
       start: { dateTime: formattedStart, timeZone: TIMEZONE },
       end: { dateTime: formattedEnd, timeZone: TIMEZONE },
     };
@@ -209,10 +282,35 @@ export const updateEvent = async (req, res) => {
       resource: updatedEvent,
     });
 
-    res.status(200).json({ success: true, event: response.data });
+    res.status(200).json({ 
+      success: true, 
+      event: response.data,
+      message: "Event updated successfully"
+    });
   } catch (err) {
     console.error("Google Calendar updateEvent error:", err);
-    res.status(500).json({ success: false, error: "Failed to update event" });
+    
+    if (err.code === 401 || err.code === 403) {
+      return res.status(503).json({ 
+        success: false, 
+        error: "Calendar authentication failed",
+        message: "Calendar service is not configured. Please contact the administrator to set up Google Calendar integration."
+      });
+    }
+    
+    if (err.message?.includes('not found') || err.code === 404) {
+      return res.status(503).json({ 
+        success: false, 
+        error: "Calendar not found",
+        message: "Calendar service is not configured. Please contact the administrator to set up Google Calendar integration."
+      });
+    }
+    
+    res.status(500).json({ 
+      success: false, 
+      error: err.message || "Failed to update event",
+      message: "An error occurred while updating the event. Please try again."
+    });
   }
 };
 
@@ -223,14 +321,19 @@ export const deleteEvent = async (req, res) => {
     if (!isCalendarConfigured || !calendar) {
       return res.status(503).json({ 
         success: false, 
-        error: "Calendar service is not configured. Please check SERVICE_ACCOUNT_PATH and CALENDAR_ID environment variables." 
+        error: "Calendar service is not configured. Please check SERVICE_ACCOUNT_PATH and CALENDAR_ID environment variables.",
+        message: "Calendar service is not configured. Please contact the administrator to set up Google Calendar integration."
       });
     }
 
     const { eventId } = req.params;
 
     if (!eventId) {
-      return res.status(400).json({ success: false, error: "Event ID required" });
+      return res.status(400).json({ 
+        success: false, 
+        error: "Event ID required",
+        message: "Event ID is required to delete the event."
+      });
     }
 
     await calendar.events.delete({
@@ -238,9 +341,33 @@ export const deleteEvent = async (req, res) => {
       eventId,
     });
 
-    res.status(200).json({ success: true, message: "Event deleted successfully" });
+    res.status(200).json({ 
+      success: true, 
+      message: "Event deleted successfully" 
+    });
   } catch (err) {
     console.error("Google Calendar deleteEvent error:", err);
-    res.status(500).json({ success: false, error: "Failed to delete event" });
+    
+    if (err.code === 401 || err.code === 403) {
+      return res.status(503).json({ 
+        success: false, 
+        error: "Calendar authentication failed",
+        message: "Calendar service is not configured. Please contact the administrator to set up Google Calendar integration."
+      });
+    }
+    
+    if (err.message?.includes('not found') || err.code === 404) {
+      return res.status(503).json({ 
+        success: false, 
+        error: "Calendar not found",
+        message: "Calendar service is not configured. Please contact the administrator to set up Google Calendar integration."
+      });
+    }
+    
+    res.status(500).json({ 
+      success: false, 
+      error: err.message || "Failed to delete event",
+      message: "An error occurred while deleting the event. Please try again."
+    });
   }
 };
