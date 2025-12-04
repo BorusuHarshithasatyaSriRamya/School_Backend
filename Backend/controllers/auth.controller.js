@@ -210,6 +210,7 @@ export const login = async (req, res) => {
 			
 			// Check for trusted device first
 			const deviceToken = req.headers["device-token"] || req.cookies?.deviceToken || req.body?.deviceToken;
+			const deviceInfo = req.body?.deviceInfo || {};
 			let isDeviceTrusted = false;
 			
 			// Debug: Log cookie information
@@ -219,8 +220,10 @@ export const login = async (req, res) => {
 				deviceTokenFromCookie: req.cookies?.deviceToken ? req.cookies.deviceToken.substring(0, 10) + "..." : null,
 				deviceTokenFromHeader: !!req.headers["device-token"],
 				deviceTokenFromBody: !!req.body?.deviceToken,
+				hasDeviceInfo: !!deviceInfo.screenResolution,
 			});
 			
+			// Try to find trusted device by deviceToken first
 			if (deviceToken) {
 				try {
 					const trustedDevice = await DeviceTrust.findOne({
@@ -235,7 +238,7 @@ export const login = async (req, res) => {
 						// Update last used timestamp
 						trustedDevice.lastUsed = new Date();
 						await trustedDevice.save();
-						console.log("✅ Device is trusted, skipping 2FA");
+						console.log("✅ Device is trusted (by token), skipping 2FA");
 					} else {
 						console.log("❌ Device token not found or expired in database");
 					}
@@ -243,8 +246,75 @@ export const login = async (req, res) => {
 					console.error("Error checking device trust:", deviceError);
 					// Continue with 2FA check if device trust check fails
 				}
-			} else {
-				console.log("⚠️ No device token found in request");
+			}
+			
+			// If not found by token, try to find by device fingerprint (for same device, different token)
+			if (!isDeviceTrusted && deviceInfo.screenResolution && deviceInfo.timezone) {
+				try {
+					const { generateDeviceFingerprint } = await import("../utils/deviceFingerprint.js");
+					// Build request object with device info from frontend
+					const reqWithDeviceInfo = {
+						...req,
+						headers: req.headers || {},
+						body: { 
+							...req.body, 
+							screenResolution: deviceInfo.screenResolution, 
+							timezone: deviceInfo.timezone,
+							platform: deviceInfo.platform || "",
+							deviceType: deviceInfo.deviceType || "",
+							userAgent: deviceInfo.userAgent || "",
+							deviceInfo: deviceInfo, // Also pass as nested object
+						},
+					};
+					const deviceFingerprint = generateDeviceFingerprint(reqWithDeviceInfo);
+					
+					console.log("🔍 Checking device trust by fingerprint:", {
+						userId: user._id.toString(),
+						fingerprint: deviceFingerprint.substring(0, 16) + "...",
+						screenResolution: deviceInfo.screenResolution,
+						timezone: deviceInfo.timezone,
+						platform: deviceInfo.platform,
+					});
+					
+					const trustedDevice = await DeviceTrust.findOne({
+						userId: user._id,
+						deviceFingerprint,
+						isActive: true,
+						expiresAt: { $gt: new Date() },
+					});
+					
+					if (trustedDevice) {
+						isDeviceTrusted = true;
+						// Update last used timestamp and sync the deviceToken cookie
+						trustedDevice.lastUsed = new Date();
+						await trustedDevice.save();
+						
+						// Update the cookie with the existing deviceToken so future logins work
+						res.cookie("deviceToken", trustedDevice.deviceToken, {
+							httpOnly: true,
+							secure: process.env.NODE_ENV === "production",
+							sameSite: process.env.NODE_ENV === "production" ? "strict" : "lax",
+							path: "/",
+							maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+						});
+						
+						console.log("✅ Device is trusted (by fingerprint), skipping 2FA", {
+							deviceId: trustedDevice._id.toString(),
+							deviceToken: trustedDevice.deviceToken.substring(0, 10) + "...",
+						});
+					} else {
+						console.log("❌ Device fingerprint not found or expired in database", {
+							searchedFingerprint: deviceFingerprint.substring(0, 16) + "...",
+						});
+					}
+				} catch (deviceError) {
+					console.error("Error checking device trust by fingerprint:", deviceError);
+					// Continue with 2FA check if device trust check fails
+				}
+			}
+			
+			if (!deviceToken && (!deviceInfo.screenResolution || !deviceInfo.timezone)) {
+				console.log("⚠️ No device token or device info found in request");
 			}
 			
 			// If device is trusted, skip 2FA and proceed with login

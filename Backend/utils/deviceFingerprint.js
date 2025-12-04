@@ -8,30 +8,55 @@ import crypto from "crypto";
 export function generateDeviceFingerprint(req) {
   // Safely access headers with fallback
   const headers = req?.headers || {};
-  const userAgent = headers["user-agent"] || "";
+  const body = req?.body || {};
+  
+  // Primary identifiers from frontend (most reliable for React Native)
+  // Check both nested deviceInfo object and direct properties for maximum compatibility
+  const screenResolution = body.deviceInfo?.screenResolution || body.screenResolution || headers["x-screen-resolution"] || "";
+  const timezone = body.deviceInfo?.timezone || body.timezone || headers["x-timezone"] || "";
+  const platform = body.deviceInfo?.platform || body.platform || "";
+  const deviceType = body.deviceInfo?.deviceType || body.deviceType || "";
+  const userAgent = body.deviceInfo?.userAgent || body.userAgent || headers["user-agent"] || "";
+  
+  // Secondary identifiers from headers (may not be present in React Native)
   const acceptLanguage = headers["accept-language"] || "";
   const acceptEncoding = headers["accept-encoding"] || "";
   const connection = headers["connection"] || "";
   
-  // Get screen resolution if available (from frontend)
-  const body = req?.body || {};
-  const screenResolution = body.screenResolution || headers["x-screen-resolution"] || "";
+  // Normalize values to ensure consistency (remove extra spaces, convert to lowercase where appropriate)
+  const normalizedScreenResolution = screenResolution.trim().toLowerCase();
+  const normalizedTimezone = timezone.trim();
+  const normalizedPlatform = platform.trim().toLowerCase();
+  const normalizedDeviceType = deviceType.trim();
+  const normalizedUserAgent = userAgent.trim();
   
-  // Get timezone if available (from frontend)
-  const timezone = body.timezone || headers["x-timezone"] || "";
-  
-  // Combine all device characteristics
+  // Combine device characteristics - prioritize frontend-sent data
+  // This ensures consistency between login and 2FA verification
+  // Order matters for hash consistency - keep this order fixed
   const deviceString = [
-    userAgent,
-    acceptLanguage,
-    acceptEncoding,
-    connection,
-    screenResolution,
-    timezone,
+    normalizedScreenResolution,  // Primary: screen resolution
+    normalizedTimezone,           // Primary: timezone
+    normalizedPlatform,           // Primary: platform (ios/android)
+    normalizedDeviceType,         // Primary: device type
+    normalizedUserAgent,          // Primary: user agent from frontend
+    acceptLanguage,               // Secondary: language
+    acceptEncoding,               // Secondary: encoding
+    connection,                   // Secondary: connection
   ].join("|");
   
   // Generate SHA-256 hash
-  return crypto.createHash("sha256").update(deviceString).digest("hex");
+  const fingerprint = crypto.createHash("sha256").update(deviceString).digest("hex");
+  
+  // Debug logging (can be removed in production)
+  console.log("🔐 Generated device fingerprint:", {
+    fingerprint: fingerprint.substring(0, 16) + "...",
+    screenResolution: normalizedScreenResolution,
+    timezone: normalizedTimezone,
+    platform: normalizedPlatform,
+    deviceType: normalizedDeviceType,
+  });
+  
+  return fingerprint;
 }
 
 /**

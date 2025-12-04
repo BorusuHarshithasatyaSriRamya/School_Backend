@@ -249,41 +249,123 @@ export const verify2FACode = async (req, res) => {
     // Create device trust if requested
     let deviceToken = null;
     if (rememberDevice) {
-      console.log("🔐 Creating device trust for user:", user._id.toString());
+      console.log("🔐 Creating/updating device trust for user:", user._id.toString());
       try {
         const DeviceTrust = (await import("../models/deviceTrust.model.js")).default;
         const { generateDeviceToken, generateDeviceFingerprint, parseDeviceInfo } = await import("../utils/deviceFingerprint.js");
         
-        deviceToken = generateDeviceToken();
-        // Pass req directly and merge body data
+        // Build request object with device info from frontend
+        // Get platform and other device info from body if available
+        const platform = req.body?.platform || req.body?.deviceInfo?.platform || "";
+        const deviceType = req.body?.deviceType || req.body?.deviceInfo?.deviceType || "";
+        const userAgentFromBody = req.body?.userAgent || req.body?.deviceInfo?.userAgent || "";
+        
         const reqWithDeviceInfo = {
           ...req,
           headers: req.headers || {},
-          body: { ...req.body, screenResolution, timezone },
+          body: { 
+            ...req.body, 
+            screenResolution, 
+            timezone,
+            platform,
+            deviceType,
+            userAgent: userAgentFromBody,
+            deviceInfo: req.body?.deviceInfo || { screenResolution, timezone, platform, deviceType, userAgent: userAgentFromBody },
+          },
         };
         const deviceFingerprint = generateDeviceFingerprint(reqWithDeviceInfo);
-        const deviceInfo = parseDeviceInfo(req.headers?.["user-agent"] || "");
+        
+        // Parse device info - use frontend data if available, otherwise parse from user-agent
+        let deviceInfo;
+        if (req.body?.deviceInfo) {
+          deviceInfo = {
+            browser: req.body.deviceInfo.browser || "React Native",
+            os: req.body.deviceInfo.deviceType || platform || "Unknown",
+            platform: platform || "Mobile",
+            userAgent: userAgentFromBody || `ReactNative-${platform}`,
+          };
+        } else {
+          deviceInfo = parseDeviceInfo(req.headers?.["user-agent"] || userAgentFromBody || "");
+        }
+        
         const ipAddress = req.ip || req.connection.remoteAddress || req.headers["x-forwarded-for"]?.split(",")[0] || "unknown";
+        
+        console.log("🔍 Checking for existing device trust:", {
+          userId: user._id.toString(),
+          fingerprint: deviceFingerprint.substring(0, 16) + "...",
+          screenResolution,
+          timezone,
+          platform,
+          deviceType,
+        });
+        
+        // Check if device trust already exists for this device fingerprint AND user
+        let trustedDevice = await DeviceTrust.findOne({
+          userId: user._id,
+          deviceFingerprint,
+          isActive: true,
+        });
+        
+        // Debug: Log all device trusts for this user to see what exists
+        const allUserDevices = await DeviceTrust.find({
+          userId: user._id,
+          isActive: true,
+        }).select("deviceFingerprint deviceToken expiresAt");
+        console.log("📋 All device trusts for user:", {
+          userId: user._id.toString(),
+          count: allUserDevices.length,
+          devices: allUserDevices.map(d => ({
+            fingerprint: d.deviceFingerprint.substring(0, 16) + "...",
+            token: d.deviceToken.substring(0, 10) + "...",
+            expiresAt: d.expiresAt.toISOString(),
+          })),
+        });
         
         const expiresAt = new Date();
         expiresAt.setDate(expiresAt.getDate() + 30);
         
-        const trustedDevice = await DeviceTrust.create({
-          userId: user._id,
-          deviceToken,
-          deviceFingerprint,
-          deviceInfo,
-          ipAddress,
-          expiresAt,
-          isActive: true,
-        });
-        
-        console.log("✅ Device trust created:", {
-          deviceId: trustedDevice._id.toString(),
-          userId: user._id.toString(),
-          deviceToken: deviceToken.substring(0, 10) + "...",
-          expiresAt: expiresAt.toISOString(),
-        });
+        if (trustedDevice) {
+          // Update existing device trust (extend expiration, update last used)
+          console.log("🔄 Updating existing device trust:", {
+            deviceId: trustedDevice._id.toString(),
+            userId: user._id.toString(),
+            oldExpiresAt: trustedDevice.expiresAt.toISOString(),
+          });
+          
+          trustedDevice.lastUsed = new Date();
+          trustedDevice.expiresAt = expiresAt;
+          trustedDevice.ipAddress = ipAddress; // Update IP in case it changed
+          // Update device info in case it changed
+          trustedDevice.deviceInfo = deviceInfo;
+          deviceToken = trustedDevice.deviceToken; // Keep existing token
+          await trustedDevice.save();
+          
+          console.log("✅ Device trust updated:", {
+            deviceId: trustedDevice._id.toString(),
+            userId: user._id.toString(),
+            deviceToken: deviceToken.substring(0, 10) + "...",
+            newExpiresAt: expiresAt.toISOString(),
+          });
+        } else {
+          // Create new device trust
+          deviceToken = generateDeviceToken();
+          trustedDevice = await DeviceTrust.create({
+            userId: user._id,
+            deviceToken,
+            deviceFingerprint,
+            deviceInfo,
+            ipAddress,
+            expiresAt,
+            isActive: true,
+          });
+          
+          console.log("✅ New device trust created:", {
+            deviceId: trustedDevice._id.toString(),
+            userId: user._id.toString(),
+            deviceToken: deviceToken.substring(0, 10) + "...",
+            expiresAt: expiresAt.toISOString(),
+          });
+        }
         
         // Set device token in cookie
         res.cookie("deviceToken", deviceToken, {
@@ -296,7 +378,7 @@ export const verify2FACode = async (req, res) => {
         
         console.log("🍪 Device token cookie set with path: /, sameSite:", process.env.NODE_ENV === "production" ? "strict" : "lax");
       } catch (deviceError) {
-        console.error("❌ Failed to create device trust:", deviceError);
+        console.error("❌ Failed to create/update device trust:", deviceError);
         // Don't fail the login if device trust creation fails
       }
     } else {
