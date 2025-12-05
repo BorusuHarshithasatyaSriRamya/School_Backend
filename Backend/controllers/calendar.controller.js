@@ -12,7 +12,9 @@ const TIMEZONE = process.env.TIMEZONE || "Asia/Kolkata";
 
 // Common paths for secret files in Render and other platforms
 const COMMON_SECRET_PATHS = [
-  '/etc/secrets/service-account-key.json', // Render secret file path
+  '/etc/secrets/service-account-key.json', // Render secret file path (default)
+  '/etc/secrets/school-calender.json', // User's secret file name
+  '/etc/secrets/school-calendar.json', // Alternative spelling
   '/run/secrets/service-account-key.json', // Docker secrets
   './secrets/service-account-key.json', // Local secrets folder
   './config/service-account-key.json', // Config folder
@@ -151,20 +153,56 @@ const initializeCalendar = () => {
 // Initialize on module load
 initializeCalendar();
 
+// Function to re-initialize calendar (useful if credentials are added after startup)
+export const reinitializeCalendar = () => {
+  console.log("Attempting to re-initialize calendar...");
+  return initializeCalendar();
+};
+
 export const createEvent = async (req, res) => {
   try {
-    // Validate calendar configuration
+    // Try to re-initialize if not configured (in case credentials were added)
     if (!isCalendarConfigured || !calendar) {
-      const missingVars = [];
-      if (!CALENDAR_ID) missingVars.push("CALENDAR_ID");
-      if (!SERVICE_ACCOUNT_JSON && !KEYFILEPATH) {
-        missingVars.push("SERVICE_ACCOUNT_JSON (for deployed) or SERVICE_ACCOUNT_PATH (for local)");
+      console.log("Calendar not configured, attempting re-initialization...");
+      const reinitSuccess = reinitializeCalendar();
+      if (!reinitSuccess) {
+        const missingVars = [];
+        const diagnostics = [];
+        
+        if (!CALENDAR_ID) {
+          missingVars.push("CALENDAR_ID");
+        } else {
+          diagnostics.push(`CALENDAR_ID is set: ${CALENDAR_ID.substring(0, 20)}...`);
+        }
+        
+        if (!SERVICE_ACCOUNT_JSON && !KEYFILEPATH) {
+          missingVars.push("SERVICE_ACCOUNT_JSON (for deployed) or SERVICE_ACCOUNT_PATH (for local)");
+        } else {
+          if (SERVICE_ACCOUNT_JSON) {
+            diagnostics.push("SERVICE_ACCOUNT_JSON is set (check if valid JSON)");
+          }
+          if (KEYFILEPATH) {
+            diagnostics.push(`SERVICE_ACCOUNT_PATH is set: ${KEYFILEPATH}`);
+            diagnostics.push(`File exists: ${fileExists(KEYFILEPATH) ? 'Yes' : 'No'}`);
+          }
+        }
+        
+        // Check common paths
+        const foundPaths = COMMON_SECRET_PATHS.filter(path => fileExists(path));
+        if (foundPaths.length > 0) {
+          diagnostics.push(`Found secret files at: ${foundPaths.join(', ')}`);
+        } else {
+          diagnostics.push("No secret files found in common paths");
+        }
+        
+        console.error("Calendar configuration diagnostics:", diagnostics);
+        
+        return res.status(503).json({ 
+          success: false, 
+          error: "Calendar service is not configured. Missing environment variables: " + missingVars.join(", ") + ". Please check the setup guide.",
+          diagnostics: diagnostics // Include diagnostics in response for debugging
+        });
       }
-      
-      return res.status(503).json({ 
-        success: false, 
-        error: "Calendar service is not configured. Missing environment variables: " + missingVars.join(", ") + ". Please check the setup guide." 
-      });
     }
 
     const { summary, description, location, startTime, endTime, category } = req.body;
@@ -221,14 +259,18 @@ export const createEvent = async (req, res) => {
 
 export const listEvents = async (req, res) => {
   try {
-    // If calendar is not configured, return empty events array gracefully
+    // Try to re-initialize if not configured (in case credentials were added)
     if (!isCalendarConfigured || !calendar) {
-      console.log("Calendar not configured, returning empty events list");
-      return res.status(200).json({ 
-        success: true, 
-        events: [],
-        message: "Calendar service is not configured. Events will not be available."
-      });
+      console.log("Calendar not configured, attempting re-initialization...");
+      const reinitSuccess = reinitializeCalendar();
+      if (!reinitSuccess) {
+        console.log("Calendar not configured, returning empty events list");
+        return res.status(200).json({ 
+          success: true, 
+          events: [],
+          message: "Calendar service is not configured. Events will not be available."
+        });
+      }
     }
 
     // Optionally: allow fetching all events, not just future
