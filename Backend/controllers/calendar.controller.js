@@ -5,9 +5,19 @@ import fs from "fs";
 dotenv.config();
 
 const KEYFILEPATH = process.env.SERVICE_ACCOUNT_PATH;
+const SERVICE_ACCOUNT_JSON = process.env.SERVICE_ACCOUNT_JSON; // For deployed backends (Render, etc.)
 const SCOPES = ["https://www.googleapis.com/auth/calendar"];
 const CALENDAR_ID = process.env.CALENDAR_ID;
 const TIMEZONE = process.env.TIMEZONE || "Asia/Kolkata";
+
+// Common paths for secret files in Render and other platforms
+const COMMON_SECRET_PATHS = [
+  '/etc/secrets/service-account-key.json', // Render secret file path
+  '/run/secrets/service-account-key.json', // Docker secrets
+  './secrets/service-account-key.json', // Local secrets folder
+  './config/service-account-key.json', // Config folder
+  process.env.GOOGLE_APPLICATION_CREDENTIALS, // Google default env var
+].filter(Boolean); // Remove undefined values
 
 // Helper function to check if file exists
 const fileExists = (filePath) => {
@@ -19,34 +29,118 @@ const fileExists = (filePath) => {
   }
 };
 
-// Initialize calendar only if credentials are available and file exists
+// Initialize calendar only if credentials are available
 let auth = null;
 let calendar = null;
 let isCalendarConfigured = false;
+let tempKeyFile = null; // Track temp file for cleanup
 
 // Function to safely initialize calendar
 const initializeCalendar = () => {
   try {
-    if (!KEYFILEPATH || !CALENDAR_ID) {
-      console.warn("Google Calendar not configured: Missing SERVICE_ACCOUNT_PATH or CALENDAR_ID");
+    if (!CALENDAR_ID) {
+      console.warn("Google Calendar not configured: Missing CALENDAR_ID environment variable");
+      console.warn("Please set CALENDAR_ID in your environment variables (e.g., 'your-calendar-id@group.calendar.google.com')");
       return false;
     }
 
-    if (!fileExists(KEYFILEPATH)) {
-      console.warn("Google Calendar not configured: Service account file not found at:", KEYFILEPATH);
+    let credentials = null;
+    let keyFilePath = null;
+
+    // Option 1: Use JSON string from environment variable (for deployed backends like Render)
+    if (SERVICE_ACCOUNT_JSON) {
+      try {
+        // Handle both string and already-parsed JSON
+        if (typeof SERVICE_ACCOUNT_JSON === 'string') {
+          credentials = JSON.parse(SERVICE_ACCOUNT_JSON);
+        } else {
+          credentials = SERVICE_ACCOUNT_JSON;
+        }
+        console.log("✓ Using service account credentials from SERVICE_ACCOUNT_JSON environment variable");
+      } catch (parseErr) {
+        console.error("✗ Failed to parse SERVICE_ACCOUNT_JSON:", parseErr.message);
+        console.error("Please ensure SERVICE_ACCOUNT_JSON is valid JSON (single line, properly escaped)");
+        // Don't return false yet, try other options
+      }
+    }
+    
+    // Option 2: Try to find secret file in common paths (for Render secret files)
+    if (!credentials) {
+      // Check explicit path first
+      if (KEYFILEPATH && fileExists(KEYFILEPATH)) {
+        keyFilePath = KEYFILEPATH;
+        console.log("✓ Found service account file at explicit path:", KEYFILEPATH);
+      } else {
+        // Try common secret file paths
+        for (const path of COMMON_SECRET_PATHS) {
+          if (fileExists(path)) {
+            keyFilePath = path;
+            console.log("✓ Found service account file at:", path);
+            break;
+          }
+        }
+      }
+      
+      if (keyFilePath) {
+        try {
+          // Read and parse the JSON file
+          const fileContent = fs.readFileSync(keyFilePath, 'utf8');
+          credentials = JSON.parse(fileContent);
+          console.log("✓ Successfully loaded service account credentials from file");
+        } catch (fileErr) {
+          console.error("✗ Failed to read/parse service account file:", fileErr.message);
+          keyFilePath = null;
+        }
+      }
+    }
+    
+    // If still no credentials, show helpful error
+    if (!credentials && !keyFilePath) {
+      console.warn("✗ Google Calendar not configured: No credentials found");
+      console.warn("Tried the following:");
+      if (SERVICE_ACCOUNT_JSON) {
+        console.warn("  - SERVICE_ACCOUNT_JSON (failed to parse)");
+      }
+      console.warn("  - SERVICE_ACCOUNT_PATH:", KEYFILEPATH || "not set");
+      console.warn("  - Common secret file paths:");
+      COMMON_SECRET_PATHS.forEach(path => {
+        console.warn(`    - ${path} ${fileExists(path) ? '✓ exists' : '✗ not found'}`);
+      });
+      console.warn("\nSolutions:");
+      console.warn("  1. For Render: Set SERVICE_ACCOUNT_JSON environment variable with JSON content");
+      console.warn("  2. For Render Secret Files: Mount secret file and set SERVICE_ACCOUNT_PATH to the mount path");
+      console.warn("  3. For local: Set SERVICE_ACCOUNT_PATH=/path/to/key.json");
       return false;
     }
 
-    auth = new google.auth.GoogleAuth({
-      keyFile: KEYFILEPATH,
-      scopes: SCOPES,
-    });
+    // Initialize auth with credentials
+    if (credentials) {
+      // Use credentials directly (from JSON string or parsed file)
+      auth = new google.auth.GoogleAuth({
+        credentials: credentials,
+        scopes: SCOPES,
+      });
+    } else if (keyFilePath) {
+      // Use file path (fallback)
+      auth = new google.auth.GoogleAuth({
+        keyFile: keyFilePath,
+        scopes: SCOPES,
+      });
+    }
+
     calendar = google.calendar({ version: "v3", auth });
     isCalendarConfigured = true;
-    console.log("Google Calendar initialized successfully");
+    console.log("✓ Google Calendar initialized successfully");
+    console.log("  Calendar ID:", CALENDAR_ID);
+    console.log("  Timezone:", TIMEZONE);
     return true;
   } catch (err) {
-    console.error("Failed to initialize Google Calendar auth:", err.message || err);
+    console.error("✗ Failed to initialize Google Calendar auth:", err.message || err);
+    console.error("Common issues:");
+    console.error("  1. Invalid service account credentials");
+    console.error("  2. Service account doesn't have access to calendar");
+    console.error("  3. Google Calendar API not enabled");
+    console.error("  4. Incorrect CALENDAR_ID format");
     isCalendarConfigured = false;
     auth = null;
     calendar = null;
@@ -61,9 +155,15 @@ export const createEvent = async (req, res) => {
   try {
     // Validate calendar configuration
     if (!isCalendarConfigured || !calendar) {
+      const missingVars = [];
+      if (!CALENDAR_ID) missingVars.push("CALENDAR_ID");
+      if (!SERVICE_ACCOUNT_JSON && !KEYFILEPATH) {
+        missingVars.push("SERVICE_ACCOUNT_JSON (for deployed) or SERVICE_ACCOUNT_PATH (for local)");
+      }
+      
       return res.status(503).json({ 
         success: false, 
-        error: "Calendar service is not configured. Please check SERVICE_ACCOUNT_PATH and CALENDAR_ID environment variables." 
+        error: "Calendar service is not configured. Missing environment variables: " + missingVars.join(", ") + ". Please check the setup guide." 
       });
     }
 
@@ -101,7 +201,21 @@ export const createEvent = async (req, res) => {
     res.status(200).json({ success: true, event: response.data });
   } catch (err) {
     console.error("Google Calendar createEvent error:", err);
-    res.status(500).json({ success: false, error: "Failed to create event" });
+    
+    // Provide more specific error messages
+    let errorMessage = "Failed to create event";
+    
+    if (err.code === 401 || err.code === 403) {
+      errorMessage = "Permission denied. Please ensure the service account has 'Make changes to events' permission on the calendar.";
+    } else if (err.code === 404) {
+      errorMessage = "Calendar not found. Please check that CALENDAR_ID is correct and the service account has access.";
+    } else if (err.message?.includes('invalid_grant') || err.message?.includes('unauthorized')) {
+      errorMessage = "Invalid credentials. Please check SERVICE_ACCOUNT_JSON is correct and the service account is valid.";
+    } else if (err.message) {
+      errorMessage = `Failed to create event: ${err.message}`;
+    }
+    
+    res.status(500).json({ success: false, error: errorMessage });
   }
 };
 
@@ -170,9 +284,15 @@ export const updateEvent = async (req, res) => {
   try {
     // Validate calendar configuration
     if (!isCalendarConfigured || !calendar) {
+      const missingVars = [];
+      if (!CALENDAR_ID) missingVars.push("CALENDAR_ID");
+      if (!SERVICE_ACCOUNT_JSON && !KEYFILEPATH) {
+        missingVars.push("SERVICE_ACCOUNT_JSON (for deployed) or SERVICE_ACCOUNT_PATH (for local)");
+      }
+      
       return res.status(503).json({ 
         success: false, 
-        error: "Calendar service is not configured. Please check SERVICE_ACCOUNT_PATH and CALENDAR_ID environment variables." 
+        error: "Calendar service is not configured. Missing environment variables: " + missingVars.join(", ") + ". Please check the setup guide." 
       });
     }
 
@@ -221,9 +341,15 @@ export const deleteEvent = async (req, res) => {
   try {
     // Validate calendar configuration
     if (!isCalendarConfigured || !calendar) {
+      const missingVars = [];
+      if (!CALENDAR_ID) missingVars.push("CALENDAR_ID");
+      if (!SERVICE_ACCOUNT_JSON && !KEYFILEPATH) {
+        missingVars.push("SERVICE_ACCOUNT_JSON (for deployed) or SERVICE_ACCOUNT_PATH (for local)");
+      }
+      
       return res.status(503).json({ 
         success: false, 
-        error: "Calendar service is not configured. Please check SERVICE_ACCOUNT_PATH and CALENDAR_ID environment variables." 
+        error: "Calendar service is not configured. Missing environment variables: " + missingVars.join(", ") + ". Please check the setup guide." 
       });
     }
 
