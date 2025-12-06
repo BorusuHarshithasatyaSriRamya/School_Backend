@@ -53,7 +53,16 @@ const __dirname = path.dirname(__filename);
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // ✅ Middlewares
-app.use(express.json({ limit: "50mb" }));
+// Configure JSON parser to skip multipart/form-data requests
+app.use(express.json({ 
+  limit: "50mb",
+  type: function (req) {
+    // Only parse JSON content, skip multipart/form-data (handled by multer)
+    const contentType = req.headers['content-type'] || '';
+    return contentType.startsWith('application/json');
+  }
+}));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 app.use(cookieParser());
 app.use(cors({
   origin: 'http://localhost:5173',

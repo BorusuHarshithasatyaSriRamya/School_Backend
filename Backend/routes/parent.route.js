@@ -8,6 +8,7 @@ import {
 } from "../controllers/parent.controller.js";
 
 import { protectRoute, adminRoute } from "../middleware/auth.middleware.js";
+import { upload } from "../utils/multer.js";
 
 const router = express.Router();
 
@@ -19,7 +20,7 @@ router.get("/:parentId", protectRoute, adminRoute, getParentWithChildren);
 // Create parent with multiple children
 router.post("/create-with-children", protectRoute, adminRoute, createParentWithChildren);
 
-// Add child to existing parent
-router.post("/:parentId/add-child", protectRoute, adminRoute, addChildToParent);
+// Add child to existing parent (with optional image upload)
+router.post("/:parentId/add-child", protectRoute, adminRoute, upload.single("image"), addChildToParent);
 
 export default router;

@@ -3,6 +3,8 @@ import Student from "../models/student.model.js";
 import User from "../models/user.model.js";
 import { generateStudentId, generateStudentCredentials, generateParentCredentialsByEmail } from "../utils/credentialGenerator.js";
 import { redis } from "../lib/redis.js";
+import cloudinary from "../lib/cloudinary.js";
+import fs from "fs";
 
 // Cache invalidation helper
 const invalidateParentCache = async () => {
@@ -13,6 +15,29 @@ const invalidateParentCache = async () => {
     }
   } catch (error) {
     console.log("Cache invalidation error:", error.message);
+  }
+};
+
+// Helper: Upload local image to Cloudinary
+const uploadImageToCloudinary = async (filePath, studentId) => {
+  try {
+    const result = await cloudinary.uploader.upload(filePath, {
+      folder: "students",
+      public_id: studentId,
+    });
+    return { public_id: result.public_id, url: result.secure_url };
+  } catch (err) {
+    console.error(`❌ Cloudinary upload failed for ${studentId}:`, err.message);
+    return null;
+  }
+};
+
+// Helper: Clean up temporary files
+const cleanupFiles = (...paths) => {
+  for (const p of paths) {
+    if (p && fs.existsSync(p)) {
+      fs.rmSync(p, { recursive: true, force: true });
+    }
   }
 };
 
@@ -186,6 +211,13 @@ export const addChildToParent = async (req, res) => {
       });
     }
 
+    // --- Upload image if exists ---
+    let imageData = null;
+    if (req.file) {
+      imageData = await uploadImageToCloudinary(req.file.path, studentId);
+      cleanupFiles(req.file.path);
+    }
+
     // Create student
     const student = await Student.create({
       studentId,
@@ -194,6 +226,7 @@ export const addChildToParent = async (req, res) => {
       section,
       birthDate: birthDate ? new Date(birthDate) : new Date(),
       parent: parent._id,
+      image: imageData,
       generatedCredentials: studentCredentials
     });
 

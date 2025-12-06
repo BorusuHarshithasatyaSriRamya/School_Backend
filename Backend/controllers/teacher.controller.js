@@ -352,6 +352,9 @@ export const assignSectionToTeacher = async (req, res) => {
 
     console.log("Assignment successful:", updatedTeacher.sectionAssignments);
 
+    // ✅ Invalidate teacher caches to ensure fresh data on next fetch
+    await invalidateCache.teachers();
+
     res.status(200).json({
       message: "Section assigned successfully",
       teacher: {
@@ -437,6 +440,7 @@ export const getTeachers = async (req, res) => {
       })
       .sort({ name: 1 });
 
+console.log("teachers", teachers);
     res.status(200).json({
       message: "Teachers fetched successfully",
       teachers
@@ -474,7 +478,6 @@ export const getAllTeachers = async (req, res) => {
     // Try to get from cache first
     const cachedData = await cache.get(cacheKey);
     if (cachedData) {
-      console.log('📦 Serving teachers from cache');
       return res.status(200).json(cachedData);
     }
 
@@ -493,6 +496,7 @@ export const getAllTeachers = async (req, res) => {
       .skip(skip)
       .limit(limitNum);
 
+      console.log("total teachers",teachers)
     const responseData = {
       message: "Teachers fetched successfully",
       teachers,
