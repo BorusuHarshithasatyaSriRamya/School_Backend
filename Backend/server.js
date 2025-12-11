@@ -105,7 +105,7 @@ app.use('/api/exam-seating', examSeatingRoutes);
 
 
 // ✅ Start the server
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running at http://localhost:${PORT}`);
   connectDB();
   // Start scheduled jobs
