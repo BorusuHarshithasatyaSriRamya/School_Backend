@@ -24,6 +24,7 @@
     "googleapis": "^159.0.0",
     "ioredis": "^5.6.1",
     "jsonwebtoken": "^9.0.2",
+    "k6": "^0.0.0",
     "mongoose": "^8.16.1",
     "multer": "^2.0.1",
     "node-cron": "^3.0.3",

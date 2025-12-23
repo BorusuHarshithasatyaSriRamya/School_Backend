@@ -4,6 +4,7 @@ import Teacher from '../models/teacher.model.js';
 import Parent from "../models/parent.model.js";
 import xlsx from 'xlsx'; 
 import { sendAbsenceAlertEmail } from '../utils/emailService.js'; // Nodemailer utility
+import PDFDocument from 'pdfkit';
 
 export const markAttendance = async (req, res) => {
   try {
@@ -16,21 +17,27 @@ export const markAttendance = async (req, res) => {
     for (let record of attendanceData) {
       const { studentId, status, reason, date } = record;
       
-      // Fix date handling to avoid timezone issues
-      const rawDate = date ? new Date(date) : new Date();
-      const dayStart = new Date(rawDate.getFullYear(), rawDate.getMonth(), rawDate.getDate(), 0, 0, 0, 0);
-      const dayEnd = new Date(rawDate.getFullYear(), rawDate.getMonth(), rawDate.getDate(), 23, 59, 59, 999);
-      const key = `${studentId}-${dayStart.toISOString()}`;
+      // Fix date handling to avoid timezone issues - use UTC consistently
+      let year, month, day;
       
-      console.log('Processing attendance for:', {
-        studentId,
-        status,
-        date: rawDate,
-        dayStart,
-        dayEnd,
-        dayStartISO: dayStart.toISOString(),
-        dayStartLocal: dayStart.toLocaleString()
-      });
+      if (typeof date === 'string' && date.match(/^\d{4}-\d{2}-\d{2}/)) {
+        // If date is in YYYY-MM-DD format, parse it directly to avoid timezone conversion
+        const parts = date.split('-');
+        year = parseInt(parts[0], 10);
+        month = parseInt(parts[1], 10) - 1; // Month is 0-indexed in Date constructor
+        day = parseInt(parts[2], 10);
+      } else {
+        // Otherwise, extract from date object using UTC methods
+        const rawDate = date ? new Date(date) : new Date();
+        year = rawDate.getUTCFullYear();
+        month = rawDate.getUTCMonth();
+        day = rawDate.getUTCDate();
+      }
+      
+      // Create dates at midnight UTC to ensure consistency across all timezones
+      const dayStart = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
+      const dayEnd = new Date(Date.UTC(year, month, day, 23, 59, 59, 999));
+      const key = `${studentId}-${dayStart.toISOString()}`;
 
       if (groupedByDate[key]) {
         skippedStudents.push(studentId); // already processed in this request
@@ -236,6 +243,7 @@ export const getStudentAttendance = async (req, res) => {
     }
 
     const { month, year } = req.query;
+    console.log("month", month);
     if (!month || !year) {
       return res.status(400).json({ message: "Month and Year are required" });
     }
@@ -430,7 +438,484 @@ export const getDailyAttendanceSummary = async (req, res) => {
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
+export const downloadStudentAttendancePDF = async (req, res) => {
+  try {
+    if (req.user.role !== "student") {
+      return res.status(403).json({ message: "Access denied" });
+    }
 
+    const { month, year } = req.query;
+    if (!month || !year) {
+      return res.status(400).json({ message: "Month and Year are required" });
+    }
+
+    const monthNum = parseInt(month, 10);
+    const yearNum = parseInt(year, 10);
+    
+    if (isNaN(monthNum) || monthNum < 1 || monthNum > 12) {
+      return res.status(400).json({ message: "Month must be between 1 and 12" });
+    }
+    
+    if (isNaN(yearNum)) {
+      return res.status(400).json({ message: "Invalid year value" });
+    }
+
+    // Get student info
+    const student = await Student.findById(req.user.studentId);
+    if (!student) {
+      return res.status(404).json({ message: "Student not found" });
+    }
+
+    // Create date range for the month
+    const startDate = new Date(Date.UTC(yearNum, monthNum - 1, 1, 0, 0, 0, 0));
+    const endDate = new Date(Date.UTC(yearNum, monthNum, 1, 0, 0, 0, 0));
+
+    // Get student's attendance
+    const attendance = await Attendance.find({
+      student: req.user.studentId,
+      date: { $gte: startDate, $lt: endDate },
+    }).sort({ date: 1 });
+
+    // Calculate summary
+    let presents = 0;
+    let absents = 0;
+    const dailyStatus = {};
+
+    attendance.forEach((rec) => {
+      const dateKey = rec.date.toISOString().slice(0, 10);
+      dailyStatus[dateKey] = rec.status;
+      if (rec.status === "present") presents++;
+      else absents++;
+    });
+
+    const totalDays = presents + absents;
+    const attendancePercentage = totalDays > 0 ? ((presents / totalDays) * 100).toFixed(1) : "0";
+
+    // Month names
+    const monthNames = [
+      "January", "February", "March", "April", "May", "June",
+      "July", "August", "September", "October", "November", "December"
+    ];
+    const monthName = monthNames[monthNum - 1];
+
+    // Generate PDF
+    const doc = new PDFDocument({ size: "A4", margin: 50 });
+    const chunks = [];
+    
+    doc.on('data', chunk => chunks.push(chunk));
+    
+    doc.on('end', () => {
+      const pdfBuffer = Buffer.concat(chunks);
+      
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="Student-Attendance-${monthNum}-${yearNum}.pdf"`);
+      res.setHeader('Content-Length', pdfBuffer.length);
+      
+      res.send(pdfBuffer);
+    });
+
+    // PDF Content
+    // Header
+    doc.fontSize(20).fillColor('#0d9488').text('Student Attendance Report', { align: 'center' });
+    doc.moveDown(0.5);
+    
+    // Student Info
+    doc.fontSize(12).fillColor('#374151');
+    doc.text(`Student: ${student.name}`, { align: 'left' });
+    doc.text(`Class: ${student.class}-${student.section}`, { align: 'left' });
+    if (student.studentId) {
+      doc.text(`Student ID: ${student.studentId}`, { align: 'left' });
+    }
+    doc.text(`Month: ${monthName} ${yearNum}`, { align: 'left' });
+    doc.text(`Generated: ${new Date().toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}`, { align: 'left' });
+    doc.moveDown(1);
+
+    // Summary Box - Fixed spacing and positioning
+    const summaryBoxY = doc.y;
+    const summaryBoxHeight = 90;
+    const summaryBoxX = 50;
+    const summaryBoxWidth = 495;
+    
+    // Draw summary box background and border
+    doc.rect(summaryBoxX, summaryBoxY, summaryBoxWidth, summaryBoxHeight)
+       .fillAndStroke('#f0fdfa', '#0d9488');
+    
+    // Summary title
+    doc.fontSize(14).fillColor('#0d9488').font('Helvetica-Bold');
+    doc.text('Summary', summaryBoxX + 15, summaryBoxY + 12);
+    
+    // Summary items with proper spacing (all inside the box)
+    doc.fontSize(11).fillColor('#1f2937').font('Helvetica');
+    const lineHeight = 13;
+    const startY = summaryBoxY + 30;
+    
+    doc.text(`Total Days: ${totalDays}`, summaryBoxX + 15, startY);
+    doc.text(`Present: ${presents}`, summaryBoxX + 15, startY + lineHeight);
+    doc.text(`Absent: ${absents}`, summaryBoxX + 15, startY + (lineHeight * 2));
+    doc.text(`Attendance Percentage: ${attendancePercentage}%`, summaryBoxX + 15, startY + (lineHeight * 3));
+    
+    // Move cursor below the summary box
+    doc.y = summaryBoxY + summaryBoxHeight + 15;
+
+    // Table Header - Improved styling with proper alignment
+    const tableStartY = doc.y;
+    const headerHeight = 30;
+    const rowHeight = 20; // Reduced to remove gaps
+    const dateColWidth = 350;
+    const statusColWidth = 145;
+    const tableWidth = dateColWidth + statusColWidth;
+    const tableX = 50;
+    
+    // Draw header background rectangle
+    doc.rect(tableX, tableStartY, tableWidth, headerHeight).fill('#0d9488');
+    
+    // Header text with proper positioning and padding
+    doc.fontSize(12).fillColor('#ffffff').font('Helvetica-Bold');
+    doc.text('Date', tableX + 10, tableStartY + 9, { width: dateColWidth - 20 });
+    doc.text('Status', tableX + dateColWidth, tableStartY + 9, { 
+      width: statusColWidth - 20,
+      align: 'center'
+    });
+    
+    // Draw header border
+    doc.rect(tableX, tableStartY, tableWidth, headerHeight).stroke('#0d9488');
+    
+    // Reset font weight for body
+    doc.font('Helvetica');
+    
+    doc.y = tableStartY + headerHeight;
+
+    // Table Rows - No gaps between rows
+    doc.fontSize(10);
+    const sortedDates = Object.keys(dailyStatus).sort();
+    
+    sortedDates.forEach((dateKey, index) => {
+      const rowY = doc.y;
+      const date = new Date(dateKey + 'T00:00:00Z');
+      const formattedDate = date.toLocaleDateString('en-US', { 
+        day: '2-digit', 
+        month: 'short', 
+        year: 'numeric',
+        weekday: 'short'
+      });
+      const status = dailyStatus[dateKey];
+      const statusText = status === 'present' ? 'Present' : 'Absent';
+      const statusColor = status === 'present' ? '#10b981' : '#ef4444';
+      
+      // Alternate row background for better readability
+      if (index % 2 === 0) {
+        doc.rect(tableX, rowY, tableWidth, rowHeight).fill('#f9fafb');
+      }
+      
+      // Draw row border (top border only, except for first row which uses header border)
+      if (index > 0) {
+        doc.moveTo(tableX, rowY).lineTo(tableX + tableWidth, rowY).stroke('#e5e7eb');
+      }
+      
+      // Date column - left aligned with padding
+      doc.fillColor('#1f2937').text(formattedDate, tableX + 10, rowY + 5, { 
+        width: dateColWidth - 20 
+      });
+      
+      // Status column - centered and bold
+      doc.fillColor(statusColor).font('Helvetica-Bold').text(statusText, tableX + dateColWidth, rowY + 5, { 
+        width: statusColWidth - 20,
+        align: 'center'
+      });
+      
+      // Reset font weight for next row
+      doc.font('Helvetica');
+      
+      // Move to next row position (no gap)
+      doc.y = rowY + rowHeight;
+      
+      // Draw bottom border for the row
+      doc.moveTo(tableX, doc.y).lineTo(tableX + tableWidth, doc.y).stroke('#e5e7eb');
+      
+      // Add new page if needed and redraw header
+      if (doc.y > 700) {
+        doc.addPage();
+        doc.y = 50;
+        
+        // Redraw header on new page
+        const newHeaderY = doc.y;
+        doc.rect(tableX, newHeaderY, tableWidth, headerHeight).fill('#0d9488');
+        doc.fontSize(12).fillColor('#ffffff').font('Helvetica-Bold');
+        doc.text('Date', tableX + 10, newHeaderY + 9, { width: dateColWidth - 20 });
+        doc.text('Status', tableX + dateColWidth, newHeaderY + 9, { 
+          width: statusColWidth - 20,
+          align: 'center'
+        });
+        doc.rect(tableX, newHeaderY, tableWidth, headerHeight).stroke('#0d9488');
+        doc.font('Helvetica'); // Reset font weight
+        doc.y = newHeaderY + headerHeight;
+      }
+    });
+
+    // Footer - Add to all pages including first page
+    // The footer should always appear at the bottom of each page
+    // We'll add it to all pages after content is complete
+    const pageCount = doc.bufferedPageRange().count;
+    for (let i = 0; i < pageCount; i++) {
+      doc.switchToPage(i);
+      doc.fontSize(8).fillColor('#9ca3af');
+      // Position footer at bottom of page (30px from bottom)
+      doc.text(
+        'Student Attendance Management System - EduReach',
+        50,
+        doc.page.height - 30,
+        { align: 'center', width: 495 }
+      );
+    }
+
+    doc.end();
+  } catch (error) {
+    console.error("Error generating PDF:", error);
+    res.status(500).json({ message: "Failed to generate PDF", error: error.message });
+  }
+};
+
+export const downloadParentAttendancePDF = async (req, res) => {
+  try {
+    if (req.user.role !== "parent") {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    const { month, year, studentId } = req.query;
+    if (!month || !year || !studentId) {
+      return res.status(400).json({ message: "Month, Year, and Student ID are required" });
+    }
+
+    const monthNum = parseInt(month, 10);
+    const yearNum = parseInt(year, 10);
+    
+    if (isNaN(monthNum) || monthNum < 1 || monthNum > 12) {
+      return res.status(400).json({ message: "Month must be between 1 and 12" });
+    }
+    
+    if (isNaN(yearNum)) {
+      return res.status(400).json({ message: "Invalid year value" });
+    }
+
+    // Find parent and verify student belongs to parent
+    const parent = await Parent.findOne({ userId: req.user._id }).populate("children");
+    if (!parent || parent.children.length === 0) {
+      return res.status(404).json({ message: "No student found for this parent" });
+    }
+
+    // Find the specific student
+    const student = parent.children.find(child => child._id.toString() === studentId);
+    if (!student) {
+      return res.status(403).json({ message: "Access denied: Student does not belong to this parent" });
+    }
+
+    // Create date range for the month
+    const startDate = new Date(Date.UTC(yearNum, monthNum - 1, 1, 0, 0, 0, 0));
+    const endDate = new Date(Date.UTC(yearNum, monthNum, 1, 0, 0, 0, 0));
+
+    // Get student's attendance
+    const attendance = await Attendance.find({
+      student: studentId,
+      date: { $gte: startDate, $lt: endDate },
+    }).sort({ date: 1 });
+
+    // Calculate summary
+    let presents = 0;
+    let absents = 0;
+    const dailyStatus = {};
+
+    attendance.forEach((rec) => {
+      const dateKey = rec.date.toISOString().slice(0, 10);
+      dailyStatus[dateKey] = rec.status;
+      if (rec.status === "present") presents++;
+      else absents++;
+    });
+
+    const totalDays = presents + absents;
+    const attendancePercentage = totalDays > 0 ? ((presents / totalDays) * 100).toFixed(1) : "0";
+
+    // Month names
+    const monthNames = [
+      "January", "February", "March", "April", "May", "June",
+      "July", "August", "September", "October", "November", "December"
+    ];
+    const monthName = monthNames[monthNum - 1];
+
+    // Generate PDF
+    const doc = new PDFDocument({ size: "A4", margin: 50 });
+    const chunks = [];
+    
+    doc.on('data', chunk => chunks.push(chunk));
+    
+    doc.on('end', () => {
+      const pdfBuffer = Buffer.concat(chunks);
+      
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="Parent-Attendance-${student.name}-${monthNum}-${yearNum}.pdf"`);
+      res.setHeader('Content-Length', pdfBuffer.length);
+      
+      res.send(pdfBuffer);
+    });
+
+    // PDF Content
+    // Header
+    doc.fontSize(20).fillColor('#0d9488').text('Parent Attendance Report', { align: 'center' });
+    doc.moveDown(0.5);
+    
+    // Student Info
+    doc.fontSize(12).fillColor('#374151');
+    doc.text(`Student: ${student.name}`, { align: 'left' });
+    doc.text(`Class: ${student.class}-${student.section}`, { align: 'left' });
+    if (student.studentId) {
+      doc.text(`Student ID: ${student.studentId}`, { align: 'left' });
+    }
+    doc.text(`Month: ${monthName} ${yearNum}`, { align: 'left' });
+    doc.text(`Generated: ${new Date().toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}`, { align: 'left' });
+    doc.moveDown(1);
+
+    // Summary Box
+    const summaryBoxY = doc.y;
+    const summaryBoxHeight = 90;
+    const summaryBoxX = 50;
+    const summaryBoxWidth = 495;
+    
+    // Draw summary box background and border
+    doc.rect(summaryBoxX, summaryBoxY, summaryBoxWidth, summaryBoxHeight)
+       .fillAndStroke('#f0fdfa', '#0d9488');
+    
+    // Summary title
+    doc.fontSize(14).fillColor('#0d9488').font('Helvetica-Bold');
+    doc.text('Summary', summaryBoxX + 15, summaryBoxY + 12);
+    
+    // Summary items with proper spacing (all inside the box)
+    doc.fontSize(11).fillColor('#1f2937').font('Helvetica');
+    const lineHeight = 13;
+    const startY = summaryBoxY + 30;
+    
+    doc.text(`Total Days: ${totalDays}`, summaryBoxX + 15, startY);
+    doc.text(`Present: ${presents}`, summaryBoxX + 15, startY + lineHeight);
+    doc.text(`Absent: ${absents}`, summaryBoxX + 15, startY + (lineHeight * 2));
+    doc.text(`Attendance Percentage: ${attendancePercentage}%`, summaryBoxX + 15, startY + (lineHeight * 3));
+    
+    // Move cursor below the summary box
+    doc.y = summaryBoxY + summaryBoxHeight + 15;
+
+    // Table Header
+    const tableStartY = doc.y;
+    const headerHeight = 30;
+    const rowHeight = 20;
+    const dateColWidth = 350;
+    const statusColWidth = 145;
+    const tableWidth = dateColWidth + statusColWidth;
+    const tableX = 50;
+    
+    // Draw header background rectangle
+    doc.rect(tableX, tableStartY, tableWidth, headerHeight).fill('#0d9488');
+    
+    // Header text with proper positioning and padding
+    doc.fontSize(12).fillColor('#ffffff').font('Helvetica-Bold');
+    doc.text('Date', tableX + 10, tableStartY + 9, { width: dateColWidth - 20 });
+    doc.text('Status', tableX + dateColWidth, tableStartY + 9, { 
+      width: statusColWidth - 20,
+      align: 'center'
+    });
+    
+    // Draw header border
+    doc.rect(tableX, tableStartY, tableWidth, headerHeight).stroke('#0d9488');
+    
+    // Reset font weight for body
+    doc.font('Helvetica');
+    
+    doc.y = tableStartY + headerHeight;
+
+    // Table Rows
+    doc.fontSize(10);
+    const sortedDates = Object.keys(dailyStatus).sort();
+    
+    sortedDates.forEach((dateKey, index) => {
+      const rowY = doc.y;
+      const date = new Date(dateKey + 'T00:00:00Z');
+      const formattedDate = date.toLocaleDateString('en-US', { 
+        day: '2-digit', 
+        month: 'short', 
+        year: 'numeric',
+        weekday: 'short'
+      });
+      const status = dailyStatus[dateKey];
+      const statusText = status === 'present' ? 'Present' : 'Absent';
+      const statusColor = status === 'present' ? '#10b981' : '#ef4444';
+      
+      // Alternate row background for better readability
+      if (index % 2 === 0) {
+        doc.rect(tableX, rowY, tableWidth, rowHeight).fill('#f9fafb');
+      }
+      
+      // Draw row border (top border only, except for first row which uses header border)
+      if (index > 0) {
+        doc.moveTo(tableX, rowY).lineTo(tableX + tableWidth, rowY).stroke('#e5e7eb');
+      }
+      
+      // Date column - left aligned with padding
+      doc.fillColor('#1f2937').text(formattedDate, tableX + 10, rowY + 5, { 
+        width: dateColWidth - 20 
+      });
+      
+      // Status column - centered and bold
+      doc.fillColor(statusColor).font('Helvetica-Bold').text(statusText, tableX + dateColWidth, rowY + 5, { 
+        width: statusColWidth - 20,
+        align: 'center'
+      });
+      
+      // Reset font weight for next row
+      doc.font('Helvetica');
+      
+      // Move to next row position (no gap)
+      doc.y = rowY + rowHeight;
+      
+      // Draw bottom border for the row
+      doc.moveTo(tableX, doc.y).lineTo(tableX + tableWidth, doc.y).stroke('#e5e7eb');
+      
+      // Add new page if needed and redraw header
+      if (doc.y > 750 && sortedDates.length > 15) {
+        doc.addPage();
+        doc.y = 50;
+        
+        // Redraw header on new page
+        const newHeaderY = doc.y;
+        doc.rect(tableX, newHeaderY, tableWidth, headerHeight).fill('#0d9488');
+        doc.fontSize(12).fillColor('#ffffff').font('Helvetica-Bold');
+        doc.text('Date', tableX + 10, newHeaderY + 9, { width: dateColWidth - 20 });
+        doc.text('Status', tableX + dateColWidth, newHeaderY + 9, { 
+          width: statusColWidth - 20,
+          align: 'center'
+        });
+        doc.rect(tableX, newHeaderY, tableWidth, headerHeight).stroke('#0d9488');
+        doc.font('Helvetica');
+        doc.y = newHeaderY + headerHeight;
+      }
+    });
+
+    // Footer - Add to all pages
+    const pageCount = doc.bufferedPageRange().count;
+    if (pageCount > 0) {
+      for (let i = 0; i < pageCount; i++) {
+        doc.switchToPage(i);
+        doc.fontSize(8).fillColor('#9ca3af');
+        doc.text(
+          'Parent Attendance Management System - EduReach',
+          50,
+          doc.page.height - 30,
+          { align: 'center', width: 495 }
+        );
+      }
+    }
+
+    doc.end();
+  } catch (error) {
+    console.error("Error generating parent attendance PDF:", error);
+    res.status(500).json({ message: "Failed to generate PDF", error: error.message });
+  }
+};
 
 
 

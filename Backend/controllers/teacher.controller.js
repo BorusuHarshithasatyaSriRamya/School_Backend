@@ -530,54 +530,109 @@ export const getClassTeachersForStudent = async (req, res) => {
       return res.status(403).json({ message: "Access denied" });
     }
 
-    // Get the student based on role
-    let student;
-
+    // For students: return teachers for that student only
     if (user.role === "student") {
-      student = await Student.findOne({ userId: user._id });
-    } else if (user.role === "parent") {
+      const student = await Student.findOne({ userId: user._id });
+      
+      if (!student) {
+        return res.status(404).json({ message: "Student record not found" });
+      }
+
+      // Find class teachers for the student's class and section
+      const teachers = await Teacher.find({
+        sectionAssignments: {
+          $elemMatch: {
+            className: student.class,
+            section: student.section,
+          },
+        },
+      }).select("name phone email subject qualification image");
+
+      // Add WhatsApp links
+      const teacherDetails = teachers.map((t) => ({
+        name: t.name,
+        phone: t.phone,
+        email: t.email,
+        subject: t.subject,
+        qualification: t.qualification,
+        image: t.image,
+        whatsappLink: t.phone ? `https://wa.me/${t.phone}` : null,
+      }));
+
+      return res.status(200).json({
+        message: "Class teachers fetched",
+        student: {
+          name: student.name,
+          class: student.class,
+          section: student.section,
+        },
+        teachers: teacherDetails,
+      });
+    }
+
+    // For parents: return teachers for all children
+    if (user.role === "parent") {
       if (!user.parentId) {
         return res.status(400).json({ message: "Parent ID missing from user profile" });
       }
 
-      student = await Student.findOne({ parent: user.parentId });
+      // Get all children for the parent
+      const children = await Student.find({ parent: user.parentId });
+
+      if (!children || children.length === 0) {
+        return res.status(404).json({ message: "No children found for this parent" });
+      }
+
+      // Get teachers for each child
+      const childrenWithTeachers = await Promise.all(
+        children.map(async (child) => {
+          const teachers = await Teacher.find({
+            sectionAssignments: {
+              $elemMatch: {
+                className: child.class,
+                section: child.section,
+              },
+            },
+          }).select("name phone email subject qualification image");
+
+          // Add WhatsApp links
+          const teacherDetails = teachers.map((t) => ({
+            name: t.name,
+            phone: t.phone,
+            email: t.email,
+            subject: t.subject,
+            qualification: t.qualification,
+            image: t.image,
+            whatsappLink: t.phone ? `https://wa.me/${t.phone}` : null,
+          }));
+
+          return {
+            student: {
+              _id: child._id,
+              name: child.name,
+              class: child.class,
+              section: child.section,
+            },
+            teachers: teacherDetails,
+          };
+        })
+      );
+console.log("childrenWithTeachers", childrenWithTeachers);
+      // If only one child, return in the old format for backward compatibility
+      if (childrenWithTeachers.length === 1) {
+        return res.status(200).json({
+          message: "Class teachers fetched",
+          student: childrenWithTeachers[0].student,
+          teachers: childrenWithTeachers[0].teachers,
+        });
+      }
+
+      // Multiple children: return array format
+      return res.status(200).json({
+        message: "Class teachers fetched for all children",
+        children: childrenWithTeachers,
+      });
     }
-
-    // Handle missing student
-    if (!student) {
-      return res.status(404).json({ message: "Student record not found" });
-    }
-
-    // Find class teachers for the student's class and section
-    const teachers = await Teacher.find({
-      sectionAssignments: {
-        $elemMatch: {
-          className: student.class,
-          section: student.section,
-        },
-      },
-    }).select("name phone subject qualification image");
-
-    // Add WhatsApp links
-    const teacherDetails = teachers.map((t) => ({
-      name: t.name,
-      phone: t.phone,
-      subject: t.subject,
-      qualification: t.qualification,
-      image: t.image,
-      whatsappLink: t.phone ? `https://wa.me/${t.phone}` : null,
-    }));
-
-    // Send response
-    res.status(200).json({
-      message: "Class teachers fetched",
-      student: {
-        name: student.name,
-        class: student.class,
-        section: student.section,
-      },
-      teachers: teacherDetails,
-    });
   } catch (error) {
     console.error("Get class teachers error:", error.message);
     res.status(500).json({ message: "Server error", error: error.message });

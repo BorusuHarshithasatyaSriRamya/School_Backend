@@ -1,3 +1,4 @@
+
 import Leave from "../models/leaveApplication.model.js";
 import Student from "../models/student.model.js";
 import Parent from "../models/parent.model.js";
@@ -25,16 +26,23 @@ export const applyLeave = async (req, res) => {
       return res.status(400).json({ message: "Student not found or not linked to this parent" });
     }
 
-    // Validate dates
+    // Validate dates - allow same dates for single-day leave
     const fromDateObj = new Date(fromDate);
+    fromDateObj.setHours(0, 0, 0, 0);
     const toDateObj = new Date(toDate);
+    toDateObj.setHours(0, 0, 0, 0);
     
-    if (fromDateObj >= toDateObj) {
-      return res.status(400).json({ message: "From date must be before to date" });
+    // Only reject if toDate is strictly before fromDate (allow same dates)
+    if (toDateObj < fromDateObj) {
+      return res.status(400).json({ message: "To date cannot be before from date" });
     }
 
-    if (fromDateObj < new Date()) {
-      return res.status(400).json({ message: "Cannot apply leave for past dates" });
+    // Restrict current date - only allow future dates (tomorrow onwards)
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    // Check if from date is today or in the past (only allow tomorrow onwards)
+    if (fromDateObj.getTime() <= today.getTime()) {
+      return res.status(400).json({ message: "Leave can only be applied for future dates (from tomorrow onwards)" });
     }
 
     const leave = await Leave.create({
